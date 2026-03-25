@@ -21,15 +21,18 @@ Desarrollo Puzzle Bot con ROS2 y LIDAR
 7. Una vez terminadas las modificaciones, hacer `git push origin <nombre-rama-nueva>` o `git push --set-upstream origin <nombre-rama-nueva>` 
 
 8. Ir a GitHub a hacer un Pull Request (PR)
+
 ![alt text](image.png)
 
 9. Crear un nuevo Pull Request (PR)
+
 ![alt text](image-1.png)
 
 10. Seleccionar las ramas en los menus desplegables y dar click en **Create pull request**.
 ![alt text](image-2.png)
 
 11. Poner un titulo descriptivo de lo que se modifico y dar click en **Create pull request**.
+
 ![alt text](image-3.png)
 
 12. Asignar a una o mas personas solicitud de aprobacion. 
@@ -52,9 +55,6 @@ Desarrollo Puzzle Bot con ROS2 y LIDAR
 > En caso de encontrar conflictos o incopatibilidades, seleccionar **Request Changes** y volver a modificar
 
 4. Realizar el merge en GitHub y eliminar la rama.
-
-
-
 
 
 
