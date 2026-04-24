@@ -38,6 +38,7 @@ Desarrollo Puzzle Bot con ROS2 y LIDAR
 ![alt text](media/image-3.png)
 
 12. Asignar a una o mas personas solicitud de aprobacion. 
+
 ![alt text](media/image-4.png)
 
 > [!TIP]
