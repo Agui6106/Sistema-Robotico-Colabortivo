@@ -3,6 +3,8 @@ Desarrollo Puzzle Bot con ROS2 y LIDAR
 
 # Instrucciones:
 1. Clonar el repositorio (1 vez). **EN CASO DE YA ESTAR CLONADO:** Realizar un `git pull` para actualizar el repositorio local
+> [!NOTE]
+> En caso de que en local aparezcan ramas antiguas que fueron borradas en en el repositorio web ejecutar: `git fetch --prune` 
 
 2. Para trabajo individual seleccionar la **rama** "tasks" usando el comando: `git checkout tasks`
 
