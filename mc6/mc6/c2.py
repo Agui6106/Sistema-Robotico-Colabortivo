@@ -1,0 +1,228 @@
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import TransformStamped, Twist, Point
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
+import numpy as np
+import transforms3d
+import signal  
+import sys 
+
+class Controller(Node):
+
+    def __init__(self):
+        super().__init__('controller')
+
+        # Handle shutdown gracefully 
+        signal.signal(signal.SIGINT, self.shutdown_function) # When Ctrl+C is pressed, call self.shutdown_function
+
+        # Declare parameters
+        self.declare_parameter('kw', 1.0)
+        self.declare_parameter('kv', 1.0)
+
+        # Retrieve parameters
+        self.kw = self.get_parameter('kw').value
+        self.kv = self.get_parameter('kv').value
+
+        # Initial Conditions
+        #self.coordinates = [(1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]
+        self.start = False
+        self.xr = 0.0
+        self.yr = 0.0
+        self.theta_r = 0.0
+        self.xg = 0.0
+        self.yg = 0.0 
+        self.i = 0
+        self.state = 'stop'
+        self.v_max = 0.4
+        self.w_max = 1.0
+        self.d_safety = 0.3 # Distance to keeep from the closest object [m].
+        self.d_start_a = 0.50 # Distance to start avoiding the closest object [m].
+        self.kv = 0.5 # Proportional gain for linear velocity.
+        self.kw = 0.5 # Proportional gain for angular velocity.
+        self.wall_leave_flag = False # This flag is true when the robot is leaving the wall
+        # Subscribers
+        self.odom_sub = self.create_subscription(Odometry, "odom", self.odom_cb, 10) 
+        self.set_point_sub = self.create_subscription(Point, "set_point", self.set_point_cb, 10)
+        self.sub = self.create_subscription(LaserScan, "scan", self.lidar_cb, 10)
+        self.leave_sub = self.create_subscription(Bool, "leave", self.leave_cb, 10) 
+
+        #Publisher
+        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.next_point_pub = self.create_publisher(Bool, "next_point", 10) 
+        self.hit_pub = self.create_publisher(Bool, "hit", 10)
+
+        # Create Message objects
+        self.cmd_vel = Twist()
+        self.odom = Odometry()
+        self.cmd_test = Twist()
+        self.lidar = LaserScan() # Data from lidar will be stored here. 
+        self.robot_vel = Twist() # Velocity command to be published will be stored here.
+
+        #Create a Timer
+        timer_period = 0.01 #seconds
+        self.timer = self.create_timer(timer_period, self.timer_cb)
+
+
+    #Timer Callback
+    def timer_cb(self):
+
+        if self.odom:
+            q = [self.odom.pose.pose.orientation.w,
+                 self.odom.pose.pose.orientation.x,
+                 self.odom.pose.pose.orientation.y,
+                 self.odom.pose.pose.orientation.z]
+            _, _, yaw = transforms3d.euler.quat2euler(q)  #input quat2euler(q=[w, x, y, z]) , output roll, pitch, yaw
+            
+            self.xr = self.odom.pose.pose.position.x
+            self.yr = self.odom.pose.pose.position.y
+            self.theta_r = yaw
+        
+            self.navigation() 
+        else:
+            print("Waiting for odometry data...")
+
+    def odom_cb(self, odom_msg):
+        self.odom = odom_msg
+    
+    def set_point_cb(self, set_point_msg):
+        self.xg = set_point_msg.x
+        self.yg = set_point_msg.y
+        self.get_logger().info(f"Received new set point: ({set_point_msg.x}, {set_point_msg.y})")
+        self.start = True
+        self.state = 'turn'
+
+    def lidar_cb(self, lidar_msg): 
+        ## This function receives the ROS LaserScan message 
+        self.lidar =  lidar_msg  
+
+    def leave_cb(self, msg):
+        if msg.data == True:
+            self.wall_leave_flag = True
+
+    def navigation(self):
+        if self.start:
+
+            ed, etheta = self.get_errors()
+            self.get_logger().info(f"Errors - Distance: {ed:.2f}, Angle: {etheta:.2f}")
+
+            if self.state == 'stop':
+                print("Stop")
+                self.get_logger().info("stop")
+                self.cmd_vel.linear.x = 0.0 
+                self.cmd_vel.angular.z = 0.0
+                self.start = False
+                self.i = 0
+                self.next_point_pub.publish(Bool(data=True))  # Signal to Point_generator to send the next point
+
+            elif self.state == 'turn':
+                if (np.abs(etheta) >= 0.08):
+                    self.get_logger().info("Turning")
+                    self.cmd_vel.linear.x = 0.0
+                    self.cmd_vel.angular.z = np.clip(self.kw * etheta, -self.w_max, self.w_max)
+                else:
+                    self.state = 'move'
+
+            elif self.state == 'move':
+                self.get_logger().info("Moving")
+
+                if (ed >= 0.025):
+                    self.cmd_vel.linear.x = min(self.kv * ed, self.v_max)
+                    self.cmd_vel.angular.z = np.clip(self.kw * etheta, -self.w_max, self.w_max)
+                    self.wall_detected(ed, etheta) # Call wall following behavior while moving towards the goal
+                    
+                else:
+                    self.get_logger().info(f"Goal reached: ({self.xg}, {self.yg})")
+                    self.i += 1
+                    self.state = 'stop'
+                
+            elif self.state == 'wall_following':
+                self.get_logger().info("Wall following")
+
+                if self.wall_leave_flag == True:
+                    self.state = 'turn'
+                    self.wall_leave_flag = False
+                else:
+                    self.get_logger().info("Waiting for leave flag")
+
+            
+            self.cmd_vel_pub.publish(self.cmd_vel)
+
+        else:
+            self.get_logger().info("Waiting for start signal...")
+
+    def get_errors(self):
+        ed = np.sqrt((self.xg - self.xr)**2 + (self.yg - self.yr)**2)
+
+        etheta = np.arctan2(self.yg - self.yr, self.xg - self.xr) - self.theta_r
+        # Normalize etheta to the range [-pi, pi]
+        etheta = np.arctan2(np.sin(etheta), np.cos(etheta))
+
+        return ed, etheta
+    
+    def get_closest_object(self):
+        closest_range = min(self.lidar.ranges)
+        closes_index = self.lidar.ranges.index(closest_range)
+        theta_closest = self.lidar.angle_min + closes_index * self.lidar.angle_increment
+        theta_closest = np.arctan2(np.sin(theta_closest), np.cos(theta_closest))
+
+        return closest_range, theta_closest
+    
+    def wall_detected(self, ed, etheta):
+        if self.lidar.ranges:
+            closest_range, theta_closest = self.get_closest_object()
+            self.get_logger().info(f"Closest range: {closest_range}")
+
+            if np.isinf(closest_range):
+                self.get_logger().info("There are no objects nearby.")
+                self.cmd_vel.linear.x = min(self.kv * ed, self.v_max)
+                self.cmd_vel.angular.z = np.clip(self.kw * etheta, -self.w_max, self.w_max)
+                
+            else:
+
+                if theta_closest > np.pi/2 or theta_closest < -np.pi/2:
+                    self.get_logger().info("Object is behind the robot. Ignoring.")
+                else:
+                    if closest_range < self.d_safety:
+                        # stop the robot and start wall following behavior
+                        self.cmd_vel.linear.x = 0.0
+                        self.cmd_vel.angular.z = 0.0
+                        self.cmd_vel_pub.publish(self.cmd_vel)
+                        self.state = 'wall_following'
+                        self.hit_pub.publish(Bool(data=True))
+                        self.get_logger().info("Object detected in front. Starting wall following behavior.")
+
+        else:
+            self.get_logger().warn("Waiting for Lidar data on /scan topic...")
+            self.cmd_vel.linear.x = 0.0
+            self.cmd_vel.angular.z = 0.0
+
+    def shutdown_function(self, signum, frame): 
+        # Handle shutdown gracefully 
+        # This function will be called when Ctrl+C is pressed 
+        # It will stop the robot and shutdown the node 
+        self.get_logger().info("Shutting down. Stopping robot...") 
+        stop_twist = Twist()  # All zeros to stop the robot 
+        self.cmd_vel_pub.publish(stop_twist) # publish it to stop the robot before shutting down 
+        rclpy.shutdown() # Shutdown the node 
+        sys.exit(0) # Exit the program 
+
+
+def main(args=None):
+    rclpy.init(args=args)
+
+    node = Controller()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if rclpy.ok():  # Ensure shutdown is only called once
+            rclpy.shutdown()
+        node.destroy_node()
+
+
+if __name__ == '__main__':
+    main()
